@@ -47,7 +47,16 @@ public final class FusionVolumeResampler {
    */
   public static PlanarImage resampleToValue(
       Volume<?, ?> volume, GeometryOfSlice plane, int width, int height) {
-    PlaneVectors p = PlaneVectors.of(volume, plane, width, height);
+    return resampleToValue(volume, plane, width, height, null);
+  }
+
+  public static PlanarImage resampleToValue(
+      Volume<?, ?> volume,
+      GeometryOfSlice plane,
+      int width,
+      int height,
+      double[] fixedToMovingLps4x4) {
+    PlaneVectors p = PlaneVectors.of(volume, plane, width, height, fixedToMovingLps4x4);
     if (p == null) {
       return null;
     }
@@ -84,7 +93,18 @@ public final class FusionVolumeResampler {
    */
   public static PlanarImage resampleToGray(
       Volume<?, ?> volume, GeometryOfSlice plane, int width, int height, double min, double max) {
-    PlaneVectors p = PlaneVectors.of(volume, plane, width, height);
+    return resampleToGray(volume, plane, width, height, min, max, null);
+  }
+
+  public static PlanarImage resampleToGray(
+      Volume<?, ?> volume,
+      GeometryOfSlice plane,
+      int width,
+      int height,
+      double min,
+      double max,
+      double[] fixedToMovingLps4x4) {
+    PlaneVectors p = PlaneVectors.of(volume, plane, width, height, fixedToMovingLps4x4);
     if (p == null) {
       return null;
     }
@@ -118,7 +138,12 @@ public final class FusionVolumeResampler {
 
   /** Plane geometry as the four vectors driving the patient-space walk, all guaranteed non-null. */
   private record PlaneVectors(Vector3d tlhc, Vector3d row, Vector3d column, Vector3d spacing) {
-    static PlaneVectors of(Volume<?, ?> volume, GeometryOfSlice plane, int width, int height) {
+    static PlaneVectors of(
+        Volume<?, ?> volume,
+        GeometryOfSlice plane,
+        int width,
+        int height,
+        double[] fixedToMovingLps4x4) {
       if (volume == null || plane == null || width <= 0 || height <= 0 || volume.isBasic()) {
         return null;
       }
@@ -129,7 +154,30 @@ public final class FusionVolumeResampler {
       if (tlhc == null || row == null || column == null || spacing == null) {
         return null;
       }
+      // Linearity of affine/rigid transform T(tlhc + r*dc + c*dr) = (R*tlhc + o) + r*(R*dc) + c*(R*dr):
+      // transforming these 3 vectors once per plane adds zero per-pixel overhead in ResampleTask.
+      if (fixedToMovingLps4x4 != null && fixedToMovingLps4x4.length == 16) {
+        return new PlaneVectors(
+            transformPointLps(fixedToMovingLps4x4, tlhc),
+            transformDirectionLps(fixedToMovingLps4x4, row),
+            transformDirectionLps(fixedToMovingLps4x4, column),
+            spacing);
+      }
       return new PlaneVectors(tlhc, row, column, spacing);
+    }
+
+    private static Vector3d transformPointLps(double[] m, Vector3d pt) {
+      return new Vector3d(
+          m[0] * pt.x + m[1] * pt.y + m[2] * pt.z + m[3],
+          m[4] * pt.x + m[5] * pt.y + m[6] * pt.z + m[7],
+          m[8] * pt.x + m[9] * pt.y + m[10] * pt.z + m[11]);
+    }
+
+    private static Vector3d transformDirectionLps(double[] m, Vector3d dir) {
+      return new Vector3d(
+          m[0] * dir.x + m[1] * dir.y + m[2] * dir.z,
+          m[4] * dir.x + m[5] * dir.y + m[6] * dir.z,
+          m[8] * dir.x + m[9] * dir.y + m[10] * dir.z);
     }
   }
 
