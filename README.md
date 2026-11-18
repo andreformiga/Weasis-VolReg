@@ -17,6 +17,13 @@
 
 ## About Weasis
 
+## Fork Enhancements: 3D Volume Registration & Cross-Study Fusion
+
+This fork (`feat/registered-3d-fusion`) extends `weasis-dicom-viewer2d` (`org.weasis.dicom.viewer2d.fusion`) to support 3D registered multimodal image fusion (`CT`, `MR`, `PT`, `NM`, `RTDOSE`) across different studies of the same patient using a `4x4` LPS transformation matrix (`fixedToMovingLps4x4`) in both 2D and MPR views, designed to integrate with the `weasis-dicom-registration` OSGi bundle (SimpleITK Mattes Mutual Information).
+
+* See [docs/registered-3d-fusion.md](docs/registered-3d-fusion.md) for the architectural decisions, backend evaluation (SimpleITK vs. FreeSurfer/elastix/ANTs), commit breakdown, and build instructions.
+
+
 **Weasis** is a powerful, multifunctional, and open-source DICOM viewer designed for both standalone and web-based use.
 It excels in medical image visualization and is widely used by healthcare professionals and research institutions.
 Engineered for seamless integration with PACS and DICOM workflows, Weasis offers a reliable solution for modern medical imaging needs — from routine reading to AI-assisted review and quantitative imaging.
