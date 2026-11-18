@@ -188,7 +188,7 @@ public class FusionOp extends AbstractOp {
       // The overlay is tied to the base series. Keep it (and its volume) only while the selected
       // functional series is still compatible with the new base series; otherwise the fusion is
       // meaningless, so disable it and release the volume.
-      if (!remainsCompatibleWith(event.series())) {
+      if (params.get(P_FUSION_TRANSFORM) != null || !remainsCompatibleWith(event.series())) {
         setParam(P_FUSION_ENABLED, Boolean.FALSE);
         setParam(P_FUSION_SERIES, null);
         setParam(P_FUSION_VOLUME, null);

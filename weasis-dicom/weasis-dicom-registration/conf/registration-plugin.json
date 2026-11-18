@@ -1,0 +1,9 @@
+{
+  "weasisPreferences": [
+    {
+      "code": "felix.auto.start.80",
+      "value": "file:${maven.localRepository}/org/weasis/dicom/weasis-dicom-registration/${app.version}/weasis-dicom-registration-${app.version}.jar",
+      "description": "Weasis 3D rigid volume registration plugin (Windows x64)"
+    }
+  ]
+}

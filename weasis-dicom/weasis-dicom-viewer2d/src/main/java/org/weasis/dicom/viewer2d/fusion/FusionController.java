@@ -15,6 +15,8 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.dcm4che3.data.Tag;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.weasis.core.api.gui.util.GuiExecutor;
 import org.weasis.core.api.image.OpManager;
 import org.weasis.core.api.media.data.MediaSeries;
@@ -28,6 +30,8 @@ import org.weasis.dicom.codec.HiddenSpecialElement;
 import org.weasis.dicom.codec.TagD;
 import org.weasis.dicom.explorer.DicomModel;
 import org.weasis.dicom.viewer2d.EventManager;
+import org.weasis.dicom.viewer2d.View2d;
+import org.weasis.dicom.viewer2d.View2dContainer;
 import org.weasis.dicom.viewer2d.mpr.MprView;
 import org.weasis.dicom.viewer2d.mpr.Volume;
 import org.weasis.opencv.op.lut.ByteLut;
@@ -39,6 +43,7 @@ import org.weasis.opencv.op.lut.colormap.ColorMap;
  * EDT, and list the study series compatible with the displayed base series.
  */
 public final class FusionController {
+  private static final Logger LOGGER = LoggerFactory.getLogger(FusionController.class);
 
   private record SeriesPairKey(String baseSeriesUid, String overlaySeriesUid) {}
 
@@ -77,33 +82,129 @@ public final class FusionController {
       MediaSeries<DicomImageElement> baseSeries,
       MediaSeries<DicomImageElement> overlaySeries,
       double[] fixedToMovingLps4x4) {
-    if (baseSeries == null
-        || overlaySeries == null
-        || fixedToMovingLps4x4 == null
-        || fixedToMovingLps4x4.length != 16) {
-      return;
+    Objects.requireNonNull(fixedToMovingLps4x4);
+    double[] matrix = fixedToMovingLps4x4.clone();
+    validateTransform(matrix);
+    if (!FusionCompatibility.isRegistrationCandidate(baseSeries, overlaySeries)) {
+      throw new IllegalArgumentException("Incompatible registration series");
     }
     String baseUid = TagD.getTagValue(baseSeries, Tag.SeriesInstanceUID, String.class);
     String overlayUid = TagD.getTagValue(overlaySeries, Tag.SeriesInstanceUID, String.class);
-    if (baseUid != null && overlayUid != null) {
-      registeredTransforms.put(
-          new SeriesPairKey(baseUid, overlayUid), fixedToMovingLps4x4.clone());
+    if (baseUid == null
+        || baseUid.isBlank()
+        || overlayUid == null
+        || overlayUid.isBlank()
+        || baseUid.equals(overlayUid)) {
+      throw new IllegalArgumentException("Registration requires two distinct series UIDs");
     }
+    registeredTransforms.put(new SeriesPairKey(baseUid, overlayUid), matrix);
+    GuiExecutor.execute(() -> activateRegisteredFusion(baseSeries, overlaySeries, matrix));
+  }
 
+  static void validateTransform(double[] matrix) {
+    if (matrix.length != 16
+        || java.util.Arrays.stream(matrix).anyMatch(v -> !Double.isFinite(v))
+        || matrix[12] != 0
+        || matrix[13] != 0
+        || matrix[14] != 0
+        || matrix[15] != 1) {
+      throw new IllegalArgumentException("Expected a finite homogeneous LPS matrix");
+    }
+    double determinant =
+        matrix[0] * (matrix[5] * matrix[10] - matrix[6] * matrix[9])
+            - matrix[1] * (matrix[4] * matrix[10] - matrix[6] * matrix[8])
+            + matrix[2] * (matrix[4] * matrix[9] - matrix[5] * matrix[8]);
+    if (!Double.isFinite(determinant) || Math.abs(determinant) < 1e-12) {
+      throw new IllegalArgumentException("Registration matrix must be invertible");
+    }
+  }
+
+  private static void activateRegisteredFusion(
+      MediaSeries<DicomImageElement> baseSeries,
+      MediaSeries<DicomImageElement> overlaySeries,
+      double[] matrix) {
+    List<ViewCanvas<DicomImageElement>> views =
+        targetViews().stream().filter(view -> resolveSourceSeries(view) == baseSeries).toList();
+    if (views.isEmpty()) {
+      return;
+    }
+    var manager = EventManager.getInstance();
+    if (manager.getSelectedView2dContainer() instanceof View2dContainer container
+        && views.getFirst() instanceof View2d fixedView) {
+      var movingView =
+          container.getViewportPanes().stream()
+              .filter(viewport -> !viewport.isTiled())
+              .map(viewport -> viewport.getSelectedCanvas())
+              .filter(View2d.class::isInstance)
+              .filter(
+                  view ->
+                      view.getSeries() == overlaySeries
+                          || (view.getSeries() instanceof RegisteredResliceSeries existing
+                              && existing.fixed() == baseSeries
+                              && existing.moving() == overlaySeries))
+              .findFirst()
+              .orElse(null);
+      if (movingView != null) {
+        reconstructComparison(container, fixedView, movingView, baseSeries, overlaySeries, matrix);
+        return;
+      }
+    }
     FusionWindow provisional = provisionalWindow(overlaySeries);
-    for (ViewCanvas<DicomImageElement> view : targetViews()) {
+    for (ViewCanvas<DicomImageElement> view : views) {
       OpManager disOp = view.getDisplayOpManager();
       disOp.setParamValue(FusionOp.OP_NAME, FusionOp.P_FUSION_SERIES, overlaySeries);
       disOp.setParamValue(FusionOp.OP_NAME, FusionOp.P_FUSION_VOLUME, null);
       disOp.setParamValue(FusionOp.OP_NAME, FusionOp.P_FUSION_WINDOW, provisional);
-      disOp.setParamValue(
-          FusionOp.OP_NAME, FusionOp.P_FUSION_TRANSFORM, fixedToMovingLps4x4.clone());
+      disOp.setParamValue(FusionOp.OP_NAME, FusionOp.P_FUSION_TRANSFORM, matrix.clone());
       disOp.setParamValue(FusionOp.OP_NAME, FusionOp.P_FUSION_ENABLED, Boolean.TRUE);
       clearCache(disOp);
       view.getImageLayer().updateDisplayOperations();
     }
     EventManager.getInstance().refreshFusionWindowControl();
     buildVolume(overlaySeries);
+  }
+
+  private static void reconstructComparison(
+      View2dContainer container,
+      View2d fixedView,
+      ViewCanvas<DicomImageElement> movingView,
+      MediaSeries<DicomImageElement> fixed,
+      MediaSeries<DicomImageElement> moving,
+      double[] matrix) {
+    var previousSeries = movingView.getSeries();
+    java.util.concurrent.CompletableFuture.supplyAsync(
+            () -> RegisteredResliceSeries.build(fixed, moving, matrix))
+        .whenComplete(
+            (reconstruction, failure) ->
+                GuiExecutor.execute(
+                    () -> {
+                      var manager = EventManager.getInstance();
+                      if (failure != null || reconstruction == null) {
+                        LOGGER.warn("Cannot reconstruct the moving series", failure);
+                        return;
+                      }
+                      if (manager.getSelectedView2dContainer() != container
+                          || !container.getView2ds().containsAll(List.of(fixedView, movingView))
+                          || fixedView.getSeries() != fixed
+                          || movingView.getSeries() != previousSeries
+                          || !java.util.Arrays.equals(
+                              matrix, getRegisteredTransform(fixed, moving))) {
+                        return;
+                      }
+                      var fixedImage = fixedView.getImage();
+                      var location =
+                          fixedImage == null ? null : fixedImage.getTagValue(TagW.SlicePosition);
+                      var first =
+                          location instanceof Double pos
+                              ? reconstruction.getNearestImage(pos, 0, null, null)
+                              : null;
+                      var display = fixedView.getDisplayOpManager();
+                      display.setParamValue(
+                          FusionOp.OP_NAME, FusionOp.P_FUSION_ENABLED, Boolean.FALSE);
+                      fixedView.getImageLayer().updateDisplayOperations();
+                      movingView.setSeries(reconstruction, first);
+                      manager.updateComponentsListener(container.getSelectedViewCanvas());
+                    }));
   }
 
   /** {@code true} while the rectified volume of the given overlay series is being built. */
@@ -175,7 +276,8 @@ public final class FusionController {
             ? v
             : null;
     double[] lpsTransform =
-        disOp.getParamValue(FusionOp.OP_NAME, FusionOp.P_FUSION_TRANSFORM, double[].class)
+        disOp
+            .getParamValue(FusionOp.OP_NAME, FusionOp.P_FUSION_TRANSFORM, double[].class)
             .orElse(null);
     @SuppressWarnings("unchecked")
     MediaSeries<DicomImageElement> overlaySeries = (MediaSeries<DicomImageElement>) series;
@@ -247,10 +349,10 @@ public final class FusionController {
       return null;
     }
     return targetViews()
-        .getFirst()
-        .getDisplayOpManager()
-        .getParamValue(FusionOp.OP_NAME, FusionOp.P_FUSION_LUT)
-        .orElse(null)
+                .getFirst()
+                .getDisplayOpManager()
+                .getParamValue(FusionOp.OP_NAME, FusionOp.P_FUSION_LUT)
+                .orElse(null)
             instanceof ByteLut lut
         ? lut.source()
         : null;
@@ -452,23 +554,34 @@ public final class FusionController {
   }
 
   /**
-   * Lists the same-study series that can be fused onto the displayed base series (see {@link
+   * Lists the series that can be fused onto the displayed base series (see {@link
    * FusionCompatibility}).
    */
-  @SuppressWarnings("unchecked")
   public static List<MediaSeries<DicomImageElement>> compatibleSeries(
       ViewCanvas<DicomImageElement> view) {
+    return candidates(view, FusionCompatibility::isCompatible);
+  }
+
+  /** Lists volumes of the current patient that can be registered to the displayed source. */
+  public static List<MediaSeries<DicomImageElement>> registrationCandidates(
+      ViewCanvas<DicomImageElement> view) {
+    return candidates(view, FusionCompatibility::isRegistrationCandidate);
+  }
+
+  @SuppressWarnings("unchecked")
+  private static List<MediaSeries<DicomImageElement>> candidates(
+      ViewCanvas<DicomImageElement> view,
+      java.util.function.BiPredicate<MediaSeries<DicomImageElement>, MediaSeries<DicomImageElement>>
+          acceptance) {
     List<MediaSeries<DicomImageElement>> result = new ArrayList<>();
     if (view == null || view.getSeries() == null) {
       return result;
     }
-    if (!(view.getSeries().getTagValue(TagW.ExplorerModel) instanceof DicomModel model)) {
+    MediaSeries<DicomImageElement> refSeries = resolveSourceSeries(view);
+    if (refSeries == null
+        || !(refSeries.getTagValue(TagW.ExplorerModel) instanceof DicomModel model)) {
       return result;
     }
-    // In MPR the displayed series is a derived reslice with a generated FrameOfReferenceUID;
-    // resolve
-    // the original acquisition series so study lookup and compatibility use the real values.
-    MediaSeries<DicomImageElement> refSeries = resolveSourceSeries(view);
     MediaSeriesGroup study = model.getParent(refSeries, DicomModel.study);
     if (study == null) {
       return result;
@@ -479,13 +592,13 @@ public final class FusionController {
     for (MediaSeriesGroup st : studies) {
       for (MediaSeriesGroup seriesGroup : model.getChildren(st)) {
         if (seriesGroup instanceof MediaSeries<?> ms
-            && FusionCompatibility.isCompatible(refSeries, (MediaSeries<DicomImageElement>) ms)) {
+            && acceptance.test(refSeries, (MediaSeries<DicomImageElement>) ms)) {
           result.add((MediaSeries<DicomImageElement>) ms);
         }
       }
     }
     for (MediaSeries<DicomImageElement> hidden : hiddenImageSeries(refSeries)) {
-      if (!result.contains(hidden) && FusionCompatibility.isCompatible(refSeries, hidden)) {
+      if (!result.contains(hidden) && acceptance.test(refSeries, hidden)) {
         result.add(hidden);
       }
     }
@@ -527,7 +640,7 @@ public final class FusionController {
   }
 
   /** Original acquisition series backing the view (the MPR source series, or the view's own). */
-  private static MediaSeries<DicomImageElement> resolveSourceSeries(
+  public static MediaSeries<DicomImageElement> resolveSourceSeries(
       ViewCanvas<DicomImageElement> view) {
     if (view instanceof MprView mprView && mprView.getMprController() != null) {
       Volume<?, ?> volume = mprView.getMprController().getVolume();

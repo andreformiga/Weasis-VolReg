@@ -11,6 +11,7 @@ package org.weasis.dicom.viewer2d.fusion;
 
 import java.awt.geom.Point2D;
 import java.util.Objects;
+import org.joml.Matrix4d;
 import org.joml.Vector3d;
 import org.weasis.core.api.gui.util.Filter;
 import org.weasis.core.api.media.data.MediaSeries;
@@ -57,6 +58,41 @@ public final class FusionSliceMatcher {
 
     // Find the PET image nearest to this 3D position
     return findNearestOverlaySlice(baseCenter, overlaySeries, filter, comparator);
+  }
+
+  /** Finds the acquired target slice nearest the registered center of the source slice. */
+  public static DicomImageElement findRegisteredSlice(
+      DicomImageElement source,
+      MediaSeries<DicomImageElement> sourceSeries,
+      MediaSeries<DicomImageElement> targetSeries,
+      Filter<DicomImageElement> filter,
+      java.util.Comparator<DicomImageElement> comparator) {
+    if ((sourceSeries instanceof RegisteredResliceSeries sourceReslice
+            && sourceReslice.fixed() == targetSeries)
+        || (targetSeries instanceof RegisteredResliceSeries targetReslice
+            && targetReslice.fixed() == sourceSeries)) {
+      return findMatchingSlice(source, targetSeries, filter, comparator);
+    }
+    double[] matrix = FusionController.getRegisteredTransform(sourceSeries, targetSeries);
+    boolean reverse = matrix == null;
+    if (reverse) {
+      matrix = FusionController.getRegisteredTransform(targetSeries, sourceSeries);
+    }
+    GeometryOfSlice geometry = source.getSliceGeometry();
+    if (matrix == null || geometry == null) {
+      return null;
+    }
+    Vector3d center = computeSliceCenter(geometry);
+    if (center == null) {
+      return null;
+    }
+    // Registration stores row-major LPS matrices, while JOML reads column-major arrays.
+    Matrix4d transform = new Matrix4d().set(matrix).transpose();
+    if (reverse) {
+      transform.invert();
+    }
+    transform.transformPosition(center);
+    return findNearestOverlaySlice(center, targetSeries, filter, comparator);
   }
 
   private static Vector3d computeSliceCenter(GeometryOfSlice geometry) {

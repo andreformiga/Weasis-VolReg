@@ -1,0 +1,6 @@
+Bundle-SymbolicName: ${project.artifactId}
+Bundle-Name: Weasis DICOM 3D Registration (SimpleITK)
+Export-Package: org.weasis.dicom.registration.api
+Private-Package: org.weasis.dicom.registration.core,org.weasis.dicom.registration.ui,org.weasis.dicom.registration.dicom,org.itk.simple
+-includeresource: native/SimpleITKJava.dll=${simpleitk.native}
+Bundle-NativeCode: native/SimpleITKJava.dll;osname=Win32;processor=x86-64

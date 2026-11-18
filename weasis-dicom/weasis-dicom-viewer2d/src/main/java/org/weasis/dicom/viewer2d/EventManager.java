@@ -89,10 +89,12 @@ import org.weasis.core.ui.editor.image.ImageViewerEventManager;
 import org.weasis.core.ui.editor.image.ImageViewerPlugin;
 import org.weasis.core.ui.editor.image.MouseActions;
 import org.weasis.core.ui.editor.image.SynchCineEvent;
+import org.weasis.core.ui.editor.image.SynchData;
 import org.weasis.core.ui.editor.image.SynchEvent;
 import org.weasis.core.ui.editor.image.SynchManager;
 import org.weasis.core.ui.editor.image.SynchView;
 import org.weasis.core.ui.editor.image.ViewCanvas;
+import org.weasis.core.ui.editor.image.ViewSynchData;
 import org.weasis.core.ui.editor.image.ViewerPlugin;
 import org.weasis.core.ui.editor.image.ViewerToolBar;
 import org.weasis.core.ui.editor.image.ZoomToolBar;
@@ -117,6 +119,7 @@ import org.weasis.dicom.viewer2d.fusion.FusionAction;
 import org.weasis.dicom.viewer2d.fusion.FusionController;
 import org.weasis.dicom.viewer2d.fusion.FusionOp;
 import org.weasis.dicom.viewer2d.fusion.FusionOpacityListener;
+import org.weasis.dicom.viewer2d.fusion.FusionSliceMatcher;
 import org.weasis.dicom.viewer2d.fusion.FusionWindow;
 import org.weasis.dicom.viewer2d.fusion.FusionWindowListener;
 import org.weasis.dicom.viewer2d.mip.MipMenu;
@@ -495,6 +498,7 @@ public class EventManager extends ImageViewerEventManager<DicomImageElement>
         // getSelectedViewPane().getActionsInView().get(ActionW.SYNCH_LINK.cmd());
         // if (synchData != null && synchData.isSynch()) {
         firePropertyChange(ActionW.SYNCH.cmd(), null, mediaEvent);
+        scrollRegisteredViews(view2d, image);
         // }
         if (image != null) {
           fireSeriesViewerListeners(
@@ -527,6 +531,51 @@ public class EventManager extends ImageViewerEventManager<DicomImageElement>
         }
       }
     };
+  }
+
+  @SuppressWarnings("unchecked")
+  private void scrollRegisteredViews(
+      ViewCanvas<DicomImageElement> source, DicomImageElement image) {
+    if (image == null
+        || !(source instanceof View2d)
+        || !(selectedView2dContainer instanceof View2dContainer container)
+        || container.getSynchView().getSynchData().getMode() != SynchData.Mode.STACK
+        || container.getSelectedViewportPane() == null
+        || container.getSelectedViewportPane().isTiled()
+        || !allowsRegisteredScroll(source)) {
+      return;
+    }
+    for (var viewport : container.getViewportPanes()) {
+      if (viewport.isTiled()) {
+        continue;
+      }
+      for (var pane : viewport.getAllViewCanvases()) {
+        if (!(pane instanceof View2d target)
+            || target == source
+            || target.getSeries() == null
+            || !allowsRegisteredScroll(target)) {
+          continue;
+        }
+        var filter =
+            (Filter<DicomImageElement>) target.getActionValue(ActionW.FILTERED_SERIES.cmd());
+        var match =
+            FusionSliceMatcher.findRegisteredSlice(
+                image,
+                source.getSeries(),
+                target.getSeries(),
+                filter,
+                target.getCurrentSortComparator());
+        if (match != null && match != target.getImage()) {
+          target.propertyChange(new SynchCineEvent(target, match, -1));
+        }
+      }
+    }
+  }
+
+  private static boolean allowsRegisteredScroll(ViewCanvas<DicomImageElement> view) {
+    return !(view.getActionValue(ActionW.SYNCH_LINK.cmd()) instanceof ViewSynchData sync)
+        || (sync.isActionEnable(ActionW.SCROLL_SERIES.cmd())
+            && (sync.isOriginal() || sync.isSynchActivated()));
   }
 
   @Override

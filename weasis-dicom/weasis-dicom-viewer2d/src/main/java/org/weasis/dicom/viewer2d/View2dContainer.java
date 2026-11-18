@@ -101,6 +101,7 @@ import org.weasis.dicom.explorer.print.DicomPrintDialog;
 import org.weasis.dicom.viewer2d.dockable.DisplayTool;
 import org.weasis.dicom.viewer2d.dockable.ImageTool;
 import org.weasis.dicom.viewer2d.mip.MipMenu;
+import org.weasis.dicom.viewer2d.mpr.MprFactory;
 
 public class View2dContainer extends DicomViewerPlugin implements PropertyChangeListener {
   private static final Logger LOGGER = LoggerFactory.getLogger(View2dContainer.class);
@@ -410,16 +411,20 @@ public class View2dContainer extends DicomViewerPlugin implements PropertyChange
               JMenuItem menuFactory = new JMenuItem(viewerFactory.getUIName());
               menuFactory.setIcon(viewerFactory.getIcon());
               GuiUtils.applySelectedIconEffect(menuFactory);
-              menuFactory.addActionListener(
-                  e ->
-                      new ViewerPluginBuilder(
-                              viewerFactory,
-                              List.of(series),
-                              (DataExplorerModel) series.getTagValue(TagW.ExplorerModel),
-                              ViewerOpenOptions.builder()
-                                  .placement(ViewerPlacement.newTab())
-                                  .build())
-                          .open());
+              if (viewerFactory instanceof MprFactory) {
+                menuFactory.addActionListener(MprFactory.getMprAction(series));
+              } else {
+                menuFactory.addActionListener(
+                    e ->
+                        new ViewerPluginBuilder(
+                                viewerFactory,
+                                List.of(series),
+                                (DataExplorerModel) series.getTagValue(TagW.ExplorerModel),
+                                ViewerOpenOptions.builder()
+                                    .placement(ViewerPlacement.newTab())
+                                    .build())
+                            .open());
+              }
               menu.add(menuFactory);
             }
           }

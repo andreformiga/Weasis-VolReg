@@ -12,6 +12,7 @@ package org.weasis.dicom.viewer2d.fusion;
 import org.weasis.core.api.gui.util.Filter;
 import org.weasis.core.api.media.data.MediaSeries;
 import org.weasis.dicom.codec.DicomImageElement;
+import org.weasis.dicom.codec.geometry.GeometryOfSlice;
 import org.weasis.dicom.viewer2d.mpr.BuildContext;
 import org.weasis.dicom.viewer2d.mpr.MprView.Plane;
 import org.weasis.dicom.viewer2d.mpr.OriginalStack;
@@ -26,6 +27,12 @@ final class FusionStack extends OriginalStack {
   FusionStack(
       Plane plane, MediaSeries<DicomImageElement> series, Filter<DicomImageElement> filter) {
     super(plane, series, filter);
+  }
+
+  @Override
+  public GeometryOfSlice getFirstSliceGeometry() {
+    // Volume assembly reads raw modality pixels on the acquisition grid.
+    return getFirstImage().getRawSliceGeometry();
   }
 
   @Override

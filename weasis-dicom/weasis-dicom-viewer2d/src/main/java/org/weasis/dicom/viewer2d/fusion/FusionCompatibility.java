@@ -9,41 +9,20 @@
  */
 package org.weasis.dicom.viewer2d.fusion;
 
+import java.util.Objects;
 import java.util.Set;
 import org.dcm4che3.data.Tag;
 import org.joml.Vector3d;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.weasis.core.api.media.data.MediaSeries;
 import org.weasis.core.api.media.data.MediaSeries.MEDIA_POSITION;
 import org.weasis.dicom.codec.DicomImageElement;
 import org.weasis.dicom.codec.SortSeriesStack;
 import org.weasis.dicom.codec.TagD;
 import org.weasis.dicom.codec.geometry.GeometryOfSlice;
+import org.weasis.dicom.explorer.DicomModel;
 
-/**
- * Decides whether a candidate series can be fused (registration-free) onto a base series.
- *
- * <p>Fusion here is a pure geometric overlay driven by each image's DICOM spatial metadata, so it
- * is only valid under strict conditions:
- *
- * <ul>
- *   <li><b>Modality pairing</b> – a functional/parametric overlay ({@code PT}, {@code NM}) on an
- *       anatomical base ({@code CT}, {@code MR}). This is the clinical-usefulness gate.
- *   <li><b>Same study</b> – both series share a non-empty {@code StudyInstanceUID}. A defensive
- *       guard: callers already pair series within one study, but it keeps spatial overlap from
- *       matching unrelated volumes if the check is ever reused in a wider scope.
- *   <li><b>Valid volume geometry</b> – both are cross-sectional volumes (≥2 slices with Image
- *       Position/Orientation Patient and Pixel Spacing).
- *   <li><b>Same patient coordinate system</b> – either the {@code FrameOfReferenceUID} matches, or
- *       (when it differs, as commonly happens for separately reconstructed PET/CT) the two volumes
- *       overlap in patient space. The latter is what other viewers rely on to fuse same-session
- *       PET/CT whose recorded Frame of Reference UIDs differ.
- * </ul>
- */
+/** Checks patient identity, volume geometry, and alignment for fusion. */
 public final class FusionCompatibility {
-
-  private static final Logger LOGGER = LoggerFactory.getLogger(FusionCompatibility.class);
 
   /** Volumetric modalities supported as either base or registered/co-located overlay. */
   private static final Set<String> VOLUMETRIC_MODALITIES =
@@ -54,73 +33,66 @@ public final class FusionCompatibility {
   /** Returns {@code true} if {@code candidate} can be fused onto {@code base}. */
   public static boolean isCompatible(
       MediaSeries<DicomImageElement> base, MediaSeries<DicomImageElement> candidate) {
+    if (!isRegistrationCandidate(base, candidate)) {
+      return false;
+    }
+    String frame = TagD.getTagValue(base, Tag.FrameOfReferenceUID, String.class);
+    return FusionController.hasRegisteredTransform(base, candidate)
+        || (frame != null
+            && !frame.isBlank()
+            && frame.equals(TagD.getTagValue(candidate, Tag.FrameOfReferenceUID, String.class)))
+        || (sameStudy(base, candidate)
+            && overlaps(boundingBoxLps(base), boundingBoxLps(candidate)));
+  }
+
+  /** Returns whether the volumes can be offered for registration. */
+  public static boolean isRegistrationCandidate(
+      MediaSeries<DicomImageElement> base, MediaSeries<DicomImageElement> candidate) {
     if (base == null || candidate == null || base == candidate) {
       return false;
     }
-    // Allow any volumetric modality pairing (CT-MR, MR-MR, CT-CT, PT-CT, PT-MR, RTDOSE-CT).
-    String baseMod = modality(base);
-    String candMod = modality(candidate);
-    if (!VOLUMETRIC_MODALITIES.contains(baseMod) || !VOLUMETRIC_MODALITIES.contains(candMod)) {
-      return false;
-    }
-    if (!samePatient(base, candidate)) {
-      LOGGER.debug(
-          "Fusion rejected ({}/{}): series belong to different patients", baseMod, candMod);
-      return false;
-    }
-    // Both must be cross-sectional volumes with valid geometry.
-    double[] baseBox = boundingBoxLps(base);
-    double[] candidateBox = boundingBoxLps(candidate);
-    if (baseBox == null || candidateBox == null) {
-      LOGGER.debug("Fusion rejected ({}/{}): a series lacks volumetric geometry", baseMod, candMod);
-      return false;
-    }
-    // Accept immediately if a 4x4 registration matrix has been computed, if FrameOfReferenceUID
-    // matches, or if volumes belong to the same patient (allowing pre/post-registration review).
-    String baseFor = frameOfReference(base);
-    boolean sameFrame = baseFor != null && baseFor.equals(frameOfReference(candidate));
-    if (sameFrame
-        || overlaps(baseBox, candidateBox)
-        || FusionController.hasRegisteredTransform(base, candidate)) {
-      return true;
-    }
-    LOGGER.debug(
-        "Fusion allowed for cross-session pair ({}/{}) pending or using 3D registration",
-        baseMod,
-        candMod);
-    return true;
+    String baseMod = TagD.getTagValue(base, Tag.Modality, String.class);
+    String candidateMod = TagD.getTagValue(candidate, Tag.Modality, String.class);
+    return baseMod != null
+        && candidateMod != null
+        && VOLUMETRIC_MODALITIES.contains(baseMod)
+        && VOLUMETRIC_MODALITIES.contains(candidateMod)
+        && samePatient(base, candidate)
+        && boundingBoxLps(base) != null
+        && boundingBoxLps(candidate) != null;
   }
 
-  private static String modality(MediaSeries<DicomImageElement> series) {
-    return TagD.getTagValue(series, Tag.Modality, String.class);
-  }
-
-  private static String frameOfReference(MediaSeries<DicomImageElement> series) {
-    return TagD.getTagValue(series, Tag.FrameOfReferenceUID, String.class);
+  private static boolean sameStudy(
+      MediaSeries<DicomImageElement> base, MediaSeries<DicomImageElement> candidate) {
+    String study =
+        TagD.getTagValue(
+            base.getMedia(MEDIA_POSITION.FIRST, null, null), Tag.StudyInstanceUID, String.class);
+    return study != null
+        && !study.isBlank()
+        && study.equals(
+            TagD.getTagValue(
+                candidate.getMedia(MEDIA_POSITION.FIRST, null, null),
+                Tag.StudyInstanceUID,
+                String.class));
   }
 
   private static boolean samePatient(
       MediaSeries<DicomImageElement> base, MediaSeries<DicomImageElement> candidate) {
-    DicomImageElement bFirst =
-        base.getMedia(MEDIA_POSITION.FIRST, null, SortSeriesStack.slicePosition);
-    DicomImageElement cFirst =
-        candidate.getMedia(MEDIA_POSITION.FIRST, null, SortSeriesStack.slicePosition);
-    if (bFirst == null || cFirst == null) {
+    String patient = DicomModel.getPatientPseudoUID(base);
+    if (patient == null
+        || patient.isBlank()
+        || !patient.equals(DicomModel.getPatientPseudoUID(candidate))) {
       return false;
     }
-    String bStudy = TagD.getTagValue(bFirst, Tag.StudyInstanceUID, String.class);
-    String cStudy = TagD.getTagValue(cFirst, Tag.StudyInstanceUID, String.class);
-    if (bStudy != null && bStudy.equals(cStudy)) {
-      return true;
-    }
-    String bPid = TagD.getTagValue(bFirst, Tag.PatientID, String.class);
-    String cPid = TagD.getTagValue(cFirst, Tag.PatientID, String.class);
-    if (bPid != null && !bPid.isBlank() && cPid != null && !cPid.isBlank()) {
-      return bPid.equals(cPid);
-    }
-    String bName = TagD.getTagValue(bFirst, Tag.PatientName, String.class);
-    String cName = TagD.getTagValue(cFirst, Tag.PatientName, String.class);
-    return bName != null && bName.equals(cName);
+    DicomImageElement first = base.getMedia(MEDIA_POSITION.FIRST, null, null);
+    DicomImageElement second = candidate.getMedia(MEDIA_POSITION.FIRST, null, null);
+    String id = TagD.getTagValue(first, Tag.PatientID, String.class);
+    return id != null
+        && !id.isBlank()
+        && id.equals(TagD.getTagValue(second, Tag.PatientID, String.class))
+        && Objects.equals(
+            TagD.getTagValue(first, Tag.IssuerOfPatientID, String.class),
+            TagD.getTagValue(second, Tag.IssuerOfPatientID, String.class));
   }
 
   /**

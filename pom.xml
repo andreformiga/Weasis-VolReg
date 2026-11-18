@@ -66,4 +66,12 @@
     <module>weasis-acquire</module>
     <module>tests</module>
   </modules>
+  <profiles>
+    <profile>
+      <id>volume-registration</id>
+      <modules>
+        <module>weasis-dicom/weasis-dicom-registration</module>
+      </modules>
+    </profile>
+  </profiles>
 </project>

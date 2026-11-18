@@ -131,6 +131,29 @@ public final class FusionVolumeResampler {
     return out;
   }
 
+  /** Reconstructs modality values on the fixed slice grid with trilinear interpolation. */
+  static PlanarImage resampleRegisteredValues(
+      Volume<?, ?> volume, GeometryOfSlice plane, int width, int height, double[] matrix) {
+    PlaneVectors vectors = PlaneVectors.of(volume, plane, width, height, matrix);
+    if (vectors == null) {
+      return null;
+    }
+    float[] data = new float[width * height];
+    float background = (float) volume.getMinimumAsDouble();
+    resample(
+        volume,
+        vectors,
+        width,
+        height,
+        (index, x, y, z) -> {
+          double value = volume.getInterpolatedDouble(x, y, z, 0);
+          data[index] = Double.isFinite(value) ? (float) value : background;
+        });
+    ImageCV image = new ImageCV(height, width, CvType.CV_32FC1);
+    image.put(0, 0, data);
+    return image;
+  }
+
   private static void resample(
       Volume<?, ?> volume, PlaneVectors p, int width, int height, VoxelSampler sampler) {
     ForkJoinPool.commonPool().invoke(new ResampleTask(0, height, width, volume, p, sampler));
@@ -154,7 +177,8 @@ public final class FusionVolumeResampler {
       if (tlhc == null || row == null || column == null || spacing == null) {
         return null;
       }
-      // Linearity of affine/rigid transform T(tlhc + r*dc + c*dr) = (R*tlhc + o) + r*(R*dc) + c*(R*dr):
+      // Linearity of affine/rigid transform T(tlhc + r*dc + c*dr) = (R*tlhc + o) + r*(R*dc) +
+      // c*(R*dr):
       // transforming these 3 vectors once per plane adds zero per-pixel overhead in ResampleTask.
       if (fixedToMovingLps4x4 != null && fixedToMovingLps4x4.length == 16) {
         return new PlaneVectors(

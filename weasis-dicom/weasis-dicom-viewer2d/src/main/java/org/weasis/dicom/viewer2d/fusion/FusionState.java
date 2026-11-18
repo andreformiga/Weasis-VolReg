@@ -36,7 +36,7 @@ public record FusionState(
     Volume<?, ?> volume,
     double[] fixedToMovingLps4x4) {
 
-   public FusionState(
+  public FusionState(
       MediaSeries<DicomImageElement> series,
       ByteLut lut,
       FusionWindow window,

@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.weasis</groupId>
+    <artifactId>weasis-parent</artifactId>
+    <version>${revision}${changelist}</version>
+    <relativePath>../../weasis-parent/pom.xml</relativePath>
+  </parent>
+
+  <groupId>org.weasis.dicom</groupId>
+  <artifactId>weasis-dicom-registration</artifactId>
+  <packaging>jar</packaging>
+  <name>Weasis DICOM 3D Volume Registration (${project.artifactId})</name>
+  <description>OSGi bundle for 3D rigid volume registration (Mattes Mutual Information) via SimpleITK</description>
+
+  <properties>
+    <simpleitk.version>2.4.0</simpleitk.version>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.weasis.thirdparty</groupId>
+      <artifactId>docking-frames</artifactId>
+    </dependency>
+    <!-- Módulos core e DICOM fornecidos pelo runtime OSGi (Apache Felix) do Weasis -->
+    <dependency>
+      <groupId>org.weasis.core</groupId>
+      <artifactId>weasis-core</artifactId>
+      <version>${project.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.weasis.dicom</groupId>
+      <artifactId>weasis-dicom-codec</artifactId>
+      <version>${project.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.weasis.dicom</groupId>
+      <artifactId>weasis-dicom-explorer</artifactId>
+      <version>${project.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.weasis.dicom</groupId>
+      <artifactId>weasis-dicom-viewer2d</artifactId>
+      <version>${project.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.itk.simple</groupId>
+      <artifactId>simpleitk</artifactId>
+      <version>${simpleitk.version}</version>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <!-- Gera MANIFEST.MF OSGi e descritores OSGI-INF/*.xml a partir de bnd.bnd -->
+      <plugin>
+        <groupId>biz.aQute.bnd</groupId>
+        <artifactId>bnd-maven-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>
