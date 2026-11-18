@@ -33,4 +33,20 @@ public record FusionState(
     FusionWindow window,
     double baseOpacity,
     double overlayOpacity,
-    Volume<?, ?> volume) {}
+    Volume<?, ?> volume,
+    double[] fixedToMovingLps4x4) {
+
+   public FusionState(
+      MediaSeries<DicomImageElement> series,
+      ByteLut lut,
+      FusionWindow window,
+      double baseOpacity,
+      double overlayOpacity,
+      Volume<?, ?> volume) {
+    this(series, lut, window, baseOpacity, overlayOpacity, volume, null);
+  }
+
+  public FusionState {
+    fixedToMovingLps4x4 = fixedToMovingLps4x4 != null ? fixedToMovingLps4x4.clone() : null;
+  }
+}
