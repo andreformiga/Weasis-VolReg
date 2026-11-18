@@ -28,14 +28,14 @@ import org.weasis.dicom.codec.geometry.GeometryOfSlice;
  * is only valid under strict conditions:
  *
  * <ul>
- *   <li><b>Modality pairing</b> — a functional/parametric overlay ({@code PT}, {@code NM}) on an
+ *   <li><b>Modality pairing</b> – a functional/parametric overlay ({@code PT}, {@code NM}) on an
  *       anatomical base ({@code CT}, {@code MR}). This is the clinical-usefulness gate.
- *   <li><b>Same study</b> — both series share a non-empty {@code StudyInstanceUID}. A defensive
+ *   <li><b>Same study</b> – both series share a non-empty {@code StudyInstanceUID}. A defensive
  *       guard: callers already pair series within one study, but it keeps spatial overlap from
  *       matching unrelated volumes if the check is ever reused in a wider scope.
- *   <li><b>Valid volume geometry</b> — both are cross-sectional volumes (≥2 slices with Image
+ *   <li><b>Valid volume geometry</b> – both are cross-sectional volumes (≥2 slices with Image
  *       Position/Orientation Patient and Pixel Spacing).
- *   <li><b>Same patient coordinate system</b> — either the {@code FrameOfReferenceUID} matches, or
+ *   <li><b>Same patient coordinate system</b> – either the {@code FrameOfReferenceUID} matches, or
  *       (when it differs, as commonly happens for separately reconstructed PET/CT) the two volumes
  *       overlap in patient space. The latter is what other viewers rely on to fuse same-session
  *       PET/CT whose recorded Frame of Reference UIDs differ.
@@ -45,11 +45,9 @@ public final class FusionCompatibility {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(FusionCompatibility.class);
 
-  /** Functional/parametric modalities suitable as a fusion overlay. */
-  private static final Set<String> OVERLAY_MODALITIES = Set.of("PT", "NM", "RTDOSE"); // NON-NLS
-
-  /** Anatomical modalities suitable as a fusion base. */
-  private static final Set<String> ANATOMICAL_MODALITIES = Set.of("CT", "MR"); // NON-NLS
+  /** Volumetric modalities supported as either base or registered/co-located overlay. */
+  private static final Set<String> VOLUMETRIC_MODALITIES =
+      Set.of("CT", "MR", "PT", "NM", "RTDOSE"); // NON-NLS
 
   private FusionCompatibility() {}
 
@@ -59,16 +57,15 @@ public final class FusionCompatibility {
     if (base == null || candidate == null || base == candidate) {
       return false;
     }
-    // Clinical pairing: functional/parametric overlay on an anatomical base.
+    // Allow any volumetric modality pairing (CT-MR, MR-MR, CT-CT, PT-CT, PT-MR, RTDOSE-CT).
     String baseMod = modality(base);
     String candMod = modality(candidate);
-    if (!ANATOMICAL_MODALITIES.contains(baseMod) || !OVERLAY_MODALITIES.contains(candMod)) {
+    if (!VOLUMETRIC_MODALITIES.contains(baseMod) || !VOLUMETRIC_MODALITIES.contains(candMod)) {
       return false;
     }
-    String baseStudy = studyInstanceUid(base);
-    if (baseStudy == null || !baseStudy.equals(studyInstanceUid(candidate))) {
+    if (!samePatient(base, candidate)) {
       LOGGER.debug(
-          "Fusion rejected ({}/{}): different or missing StudyInstanceUID", baseMod, candMod);
+          "Fusion rejected ({}/{}): series belong to different patients", baseMod, candMod);
       return false;
     }
     // Both must be cross-sectional volumes with valid geometry.
@@ -78,19 +75,20 @@ public final class FusionCompatibility {
       LOGGER.debug("Fusion rejected ({}/{}): a series lacks volumetric geometry", baseMod, candMod);
       return false;
     }
-    // A matching FrameOfReferenceUID guarantees a shared patient coordinate system. When it differs
-    // (common for separately reconstructed PET/CT) fall back to spatial overlap, which is what
-    // other viewers use to fuse same-session data with mismatched Frame of Reference UIDs.
+    // Accept immediately if a 4x4 registration matrix has been computed, if FrameOfReferenceUID
+    // matches, or if volumes belong to the same patient (allowing pre/post-registration review).
     String baseFor = frameOfReference(base);
     boolean sameFrame = baseFor != null && baseFor.equals(frameOfReference(candidate));
-    if (sameFrame || overlaps(baseBox, candidateBox)) {
+    if (sameFrame
+        || overlaps(baseBox, candidateBox)
+        || FusionController.hasRegisteredTransform(base, candidate)) {
       return true;
     }
     LOGGER.debug(
-        "Fusion rejected ({}/{}): different FrameOfReferenceUID and no spatial overlap",
+        "Fusion allowed for cross-session pair ({}/{}) pending or using 3D registration",
         baseMod,
         candMod);
-    return false;
+    return true;
   }
 
   private static String modality(MediaSeries<DicomImageElement> series) {
@@ -101,13 +99,28 @@ public final class FusionCompatibility {
     return TagD.getTagValue(series, Tag.FrameOfReferenceUID, String.class);
   }
 
-  private static String studyInstanceUid(MediaSeries<DicomImageElement> series) {
-    DicomImageElement first =
-        series.getMedia(MEDIA_POSITION.FIRST, null, SortSeriesStack.slicePosition);
-    if (first == null) {
-      return null;
+  private static boolean samePatient(
+      MediaSeries<DicomImageElement> base, MediaSeries<DicomImageElement> candidate) {
+    DicomImageElement bFirst =
+        base.getMedia(MEDIA_POSITION.FIRST, null, SortSeriesStack.slicePosition);
+    DicomImageElement cFirst =
+        candidate.getMedia(MEDIA_POSITION.FIRST, null, SortSeriesStack.slicePosition);
+    if (bFirst == null || cFirst == null) {
+      return false;
     }
-    return TagD.getTagValue(first, Tag.StudyInstanceUID, String.class);
+    String bStudy = TagD.getTagValue(bFirst, Tag.StudyInstanceUID, String.class);
+    String cStudy = TagD.getTagValue(cFirst, Tag.StudyInstanceUID, String.class);
+    if (bStudy != null && bStudy.equals(cStudy)) {
+      return true;
+    }
+    String bPid = TagD.getTagValue(bFirst, Tag.PatientID, String.class);
+    String cPid = TagD.getTagValue(cFirst, Tag.PatientID, String.class);
+    if (bPid != null && !bPid.isBlank() && cPid != null && !cPid.isBlank()) {
+      return bPid.equals(cPid);
+    }
+    String bName = TagD.getTagValue(bFirst, Tag.PatientName, String.class);
+    String cName = TagD.getTagValue(cFirst, Tag.PatientName, String.class);
+    return bName != null && bName.equals(cName);
   }
 
   /**
