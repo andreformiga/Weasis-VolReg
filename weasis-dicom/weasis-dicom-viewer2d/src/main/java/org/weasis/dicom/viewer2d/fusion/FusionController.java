@@ -40,10 +40,71 @@ import org.weasis.opencv.op.lut.colormap.ColorMap;
  */
 public final class FusionController {
 
+  private record SeriesPairKey(String baseSeriesUid, String overlaySeriesUid) {}
+
   private static final Set<MediaSeries<DicomImageElement>> buildingVolumes =
       ConcurrentHashMap.newKeySet();
 
+  private static final ConcurrentHashMap<SeriesPairKey, double[]> registeredTransforms =
+      new ConcurrentHashMap<>();
+
   private FusionController() {}
+
+  public static boolean hasRegisteredTransform(
+      MediaSeries<DicomImageElement> base, MediaSeries<DicomImageElement> overlay) {
+    return getRegisteredTransform(base, overlay) != null;
+  }
+
+  public static double[] getRegisteredTransform(
+      MediaSeries<DicomImageElement> base, MediaSeries<DicomImageElement> overlay) {
+    if (base == null || overlay == null) {
+      return null;
+    }
+    String baseUid = TagD.getTagValue(base, Tag.SeriesInstanceUID, String.class);
+    String overlayUid = TagD.getTagValue(overlay, Tag.SeriesInstanceUID, String.class);
+    if (baseUid == null || overlayUid == null) {
+      return null;
+    }
+    double[] m = registeredTransforms.get(new SeriesPairKey(baseUid, overlayUid));
+    return m != null ? m.clone() : null;
+  }
+
+  /**
+   * Registers a 4x4 row-major LPS matrix (Fixed -> Moving) for {@code (baseSeries, overlaySeries)}
+   * and activates 3D resliced fusion on the active 2D view or across all 3 MPR planes.
+   */
+  public static void applyRegisteredFusion(
+      MediaSeries<DicomImageElement> baseSeries,
+      MediaSeries<DicomImageElement> overlaySeries,
+      double[] fixedToMovingLps4x4) {
+    if (baseSeries == null
+        || overlaySeries == null
+        || fixedToMovingLps4x4 == null
+        || fixedToMovingLps4x4.length != 16) {
+      return;
+    }
+    String baseUid = TagD.getTagValue(baseSeries, Tag.SeriesInstanceUID, String.class);
+    String overlayUid = TagD.getTagValue(overlaySeries, Tag.SeriesInstanceUID, String.class);
+    if (baseUid != null && overlayUid != null) {
+      registeredTransforms.put(
+          new SeriesPairKey(baseUid, overlayUid), fixedToMovingLps4x4.clone());
+    }
+
+    FusionWindow provisional = provisionalWindow(overlaySeries);
+    for (ViewCanvas<DicomImageElement> view : targetViews()) {
+      OpManager disOp = view.getDisplayOpManager();
+      disOp.setParamValue(FusionOp.OP_NAME, FusionOp.P_FUSION_SERIES, overlaySeries);
+      disOp.setParamValue(FusionOp.OP_NAME, FusionOp.P_FUSION_VOLUME, null);
+      disOp.setParamValue(FusionOp.OP_NAME, FusionOp.P_FUSION_WINDOW, provisional);
+      disOp.setParamValue(
+          FusionOp.OP_NAME, FusionOp.P_FUSION_TRANSFORM, fixedToMovingLps4x4.clone());
+      disOp.setParamValue(FusionOp.OP_NAME, FusionOp.P_FUSION_ENABLED, Boolean.TRUE);
+      clearCache(disOp);
+      view.getImageLayer().updateDisplayOperations();
+    }
+    EventManager.getInstance().refreshFusionWindowControl();
+    buildVolume(overlaySeries);
+  }
 
   /** {@code true} while the rectified volume of the given overlay series is being built. */
   public static boolean isVolumeBuilding(Object series) {
@@ -59,7 +120,7 @@ public final class FusionController {
 
   /**
    * The panes a fusion change applies to: the selected one. Fusion is per-view, so the other panes
-   * of a layout keep whatever they show — the same series left unfused for comparison as much as an
+   * of a layout keep whatever they show – the same series left unfused for comparison as much as an
    * unrelated one, or the functional series itself.
    *
    * <p>MPR is the exception: its panes are three planes of a single acquisition and only ever show
@@ -113,9 +174,12 @@ public final class FusionController {
                 instanceof Volume<?, ?> v
             ? v
             : null;
+    double[] lpsTransform =
+        disOp.getParamValue(FusionOp.OP_NAME, FusionOp.P_FUSION_TRANSFORM, double[].class)
+            .orElse(null);
     @SuppressWarnings("unchecked")
     MediaSeries<DicomImageElement> overlaySeries = (MediaSeries<DicomImageElement>) series;
-    return new FusionState(overlaySeries, lut, window, base, overlay, volume);
+    return new FusionState(overlaySeries, lut, window, base, overlay, volume, lpsTransform);
   }
 
   /**
@@ -136,6 +200,8 @@ public final class FusionController {
       if (state.volume() != null) {
         disOp.setParamValue(FusionOp.OP_NAME, FusionOp.P_FUSION_VOLUME, state.volume());
       }
+      disOp.setParamValue(
+          FusionOp.OP_NAME, FusionOp.P_FUSION_TRANSFORM, state.fixedToMovingLps4x4());
       disOp.setParamValue(FusionOp.OP_NAME, FusionOp.P_FUSION_ENABLED, Boolean.TRUE);
       clearCache(disOp);
       view.getImageLayer().updateDisplayOperations();
@@ -181,10 +247,10 @@ public final class FusionController {
       return null;
     }
     return targetViews()
-                .getFirst()
-                .getDisplayOpManager()
-                .getParamValue(FusionOp.OP_NAME, FusionOp.P_FUSION_LUT)
-                .orElse(null)
+        .getFirst()
+        .getDisplayOpManager()
+        .getParamValue(FusionOp.OP_NAME, FusionOp.P_FUSION_LUT)
+        .orElse(null)
             instanceof ByteLut lut
         ? lut.source()
         : null;
@@ -205,7 +271,7 @@ public final class FusionController {
   public static void applyWindowTop(double displayMax) {
     FusionWindow window = currentWindow();
     if (window != null && Double.isFinite(displayMax) && displayMax > window.displayMin()) {
-      setParam(FusionOp.P_FUSION_WINDOW, window.withDisplayMax(displayMax));
+      setParam(FusionOp.OP_NAME, window.withDisplayMax(displayMax));
     }
   }
 
@@ -258,7 +324,8 @@ public final class FusionController {
         seriesChange
             || FusionOp.P_FUSION_LUT.equals(propertyName)
             || FusionOp.P_FUSION_WINDOW.equals(propertyName)
-            || FusionOp.P_FUSION_VOLUME.equals(propertyName);
+            || FusionOp.P_FUSION_VOLUME.equals(propertyName)
+            || FusionOp.P_FUSION_TRANSFORM.equals(propertyName);
     for (ViewCanvas<DicomImageElement> view : targetViews()) {
       OpManager disOp = view.getDisplayOpManager();
       disOp.setParamValue(FusionOp.OP_NAME, propertyName, value);
@@ -269,6 +336,13 @@ public final class FusionController {
       if (seriesChange) {
         disOp.setParamValue(FusionOp.OP_NAME, FusionOp.P_FUSION_VOLUME, null);
         disOp.setParamValue(FusionOp.OP_NAME, FusionOp.P_FUSION_WINDOW, null);
+        @SuppressWarnings("unchecked")
+        MediaSeries<DicomImageElement> newOverlay =
+            value instanceof MediaSeries<?> ms ? (MediaSeries<DicomImageElement>) ms : null;
+        disOp.setParamValue(
+            FusionOp.OP_NAME,
+            FusionOp.P_FUSION_TRANSFORM,
+            getRegisteredTransform(resolveSourceSeries(view), newOverlay));
       }
       if (clearCache) {
         clearCache(disOp);
@@ -399,10 +473,15 @@ public final class FusionController {
     if (study == null) {
       return result;
     }
-    for (MediaSeriesGroup seriesGroup : model.getChildren(study)) {
-      if (seriesGroup instanceof MediaSeries<?> ms
-          && FusionCompatibility.isCompatible(refSeries, (MediaSeries<DicomImageElement>) ms)) {
-        result.add((MediaSeries<DicomImageElement>) ms);
+    MediaSeriesGroup patient = model.getParent(study, DicomModel.patient);
+    Iterable<MediaSeriesGroup> studies =
+        patient != null ? model.getChildren(patient) : List.of(study);
+    for (MediaSeriesGroup st : studies) {
+      for (MediaSeriesGroup seriesGroup : model.getChildren(st)) {
+        if (seriesGroup instanceof MediaSeries<?> ms
+            && FusionCompatibility.isCompatible(refSeries, (MediaSeries<DicomImageElement>) ms)) {
+          result.add((MediaSeries<DicomImageElement>) ms);
+        }
       }
     }
     for (MediaSeries<DicomImageElement> hidden : hiddenImageSeries(refSeries)) {
