@@ -46,7 +46,7 @@ import org.weasis.opencv.op.lut.colormap.ColorMapCompiler;
  * Image operation that overlays a PET (or other functional) image onto the current CT/MR image and
  * blends them with an intensity-modulated alpha.
  *
- * <p>Values are mapped to the LUT through a series-wide {@link FusionWindow}, then colorised
+ * <p>Values are mapped to the LUT through a series-wide {@link FusionWindow}, then colourised
  * through a {@link ByteLut} into a per-pixel ABGR overlay: background stays fully transparent while
  * everything above it is blended at the overlay opacity, so the palette alone carries the value.
  *
@@ -55,7 +55,7 @@ import org.weasis.opencv.op.lut.colormap.ColorMapCompiler;
  * <ol>
  *   <li><b>Volume reslice</b> (preferred, set via {@link #P_FUSION_VOLUME}): the PET volume is
  *       resampled at the true 3D position of the displayed plane ({@link FusionVolumeResampler}).
- *       This stays correct for MPR/oblique reslices.
+ *       This stays correct for oblique and MPR/oblique reslices.
  *   <li><b>Single-slice fallback</b> (no volume available): the nearest native PET slice is found
  *       ({@link FusionSliceMatcher}) and 2D-affine aligned ({@link FusionRegistration}).
  * </ol>
@@ -68,8 +68,8 @@ import org.weasis.opencv.op.lut.colormap.ColorMapCompiler;
  *   <li>{@link #P_FUSION_VOLUME} - The resampled PET Volume, optional (Volume)
  *   <li>{@link #P_FUSION_LUT} - The PET color lookup table (ByteLut)
  *   <li>{@link #P_FUSION_WINDOW} - The PET display window (FusionWindow)
- *   <li>{@link #P_OPACITY_BASE} - CT opacity 0.0–1.0 (Double)
- *   <li>{@link #P_OPACITY_OVERLAY} - PET opacity 0.0–1.0 (Double)
+ *   <li>{@link #P_OPACITY_BASE} - CT opacity 0.0-1.0 (Double)
+ *   <li>{@link #P_OPACITY_OVERLAY} - PET opacity 0.0-1.0 (Double)
  *   <li>{@link #P_BASE_IMAGE} - The current CT DicomImageElement (DicomImageElement)
  * </ul>
  */
@@ -101,6 +101,9 @@ public class FusionOp extends AbstractOp {
   /** The current base (CT/MR) image element. */
   public static final String P_BASE_IMAGE = "fusion.base.image";
 
+  /** Optional 4x4 row-major LPS matrix (Fixed -> Moving) computed by 3D registration. */
+  public static final String P_FUSION_TRANSFORM = "fusion.transform.lps4x4";
+
   /** Default {@link #P_OPACITY_BASE}: the anatomy is shown untouched where the overlay is cold. */
   public static final double DEFAULT_BASE_OPACITY = 1.0;
 
@@ -119,7 +122,7 @@ public class FusionOp extends AbstractOp {
   /**
    * LUT index from which the overlay reaches the full overlay opacity. Alpha must saturate early:
    * the color LUT already encodes the value, so low uptake belongs on screen as the dark end of the
-   * palette. Fading it out as well — the entry is then dark <em>and</em> transparent — is what
+   * palette. Fading it out as well – the entry is then dark <em>and</em> transparent – is what
    * makes everything but the hottest voxels disappear.
    */
   private static final int ALPHA_OPAQUE_FROM = LUT_SIZE / 10;
@@ -139,7 +142,7 @@ public class FusionOp extends AbstractOp {
   /**
    * Volume-path cache keyed by the displayed plane geometry. MPR reuses a single {@link
    * DicomImageElement} per axis and only mutates its geometry between reslices, so the overlay must
-   * be keyed by the plane (which has value-based equality) rather than the element identity —
+   * be keyed by the plane (which has value-based equality) rather than the element identity –
    * otherwise the first plane's overlay would be reused for every reslice. Bounded LRU because the
    * {@link GeometryOfSlice} keys are not retained anywhere else.
    */
@@ -172,11 +175,12 @@ public class FusionOp extends AbstractOp {
     } else if (OpEvent.RESET_DISPLAY.equals(type)) {
       // Reset returns to the plain base image: fusion is an opt-in overlay, so turn it off and
       // release the overlay state. The same volume instance is shared across the MPR panes, so only
-      // drop the reference here; GC reclaims it once every pane has released it.
+      // drop the reference here; GC reclams it once every pane has released it.
       setParam(P_FUSION_ENABLED, Boolean.FALSE);
       setParam(P_BASE_IMAGE, null);
       setParam(P_FUSION_VOLUME, null);
       setParam(P_FUSION_WINDOW, null);
+      setParam(P_FUSION_TRANSFORM, null);
       clearCache();
     } else if (OpEvent.SERIES_CHANGE.equals(type)) {
       setParam(P_BASE_IMAGE, null);
@@ -189,6 +193,7 @@ public class FusionOp extends AbstractOp {
         setParam(P_FUSION_SERIES, null);
         setParam(P_FUSION_VOLUME, null);
         setParam(P_FUSION_WINDOW, null);
+        setParam(P_FUSION_TRANSFORM, null);
       }
     }
   }
@@ -271,9 +276,16 @@ public class FusionOp extends AbstractOp {
     if (window == null) {
       return null;
     }
+    double[] lpsTransform = getParam(P_FUSION_TRANSFORM, double[].class);
     PlanarImage overlayGray =
         FusionVolumeResampler.resampleToGray(
-            volume, plane, baseSource.width(), baseSource.height(), window.min(), window.max());
+            volume,
+            plane,
+            baseSource.width(),
+            baseSource.height(),
+            window.min(),
+            window.max(),
+            lpsTransform);
     if (overlayGray == null) {
       return null;
     }
@@ -287,6 +299,10 @@ public class FusionOp extends AbstractOp {
       DicomImageElement baseImage,
       MediaSeries<DicomImageElement> overlaySeries,
       PlanarImage baseSource) {
+    if (getParam(P_FUSION_TRANSFORM, double[].class) != null) {
+      // Wait for buildVolume() to supply the 3D volume so out-of-plane 3D rotations stay exact.
+      return null;
+    }
     DicomImageElement overlayImage =
         FusionSliceMatcher.findMatchingSlice(baseImage, overlaySeries, null, null);
     if (overlayImage == null) {
@@ -386,6 +402,7 @@ public class FusionOp extends AbstractOp {
     Mat alpha = new Mat();
     ch.getFirst()
         .convertTo(alpha, CvType.CV_32F, overlayOpacity / 255.0); // a in [0, overlayOpacity]
+
     Mat alpha3 = new Mat();
     Core.merge(List.of(alpha, alpha, alpha), alpha3);
 
@@ -464,7 +481,7 @@ public class FusionOp extends AbstractOp {
    *
    * <p>Unlike the display overlay, statistics favor fidelity over MPR-correctness: when the
    * displayed plane is coplanar with a native PET slice (the usual axial PET/CT case) it samples
-   * that slice's actual voxels, avoiding the smoothing introduced by the rectified fusion volume —
+   * that slice's actual voxels, avoiding the smoothing introduced by the rectified fusion volume –
    * which would otherwise lower SUVmax. The volume is used only as a fallback for oblique/MPR
    * planes that have no matching native slice.
    */
@@ -480,26 +497,30 @@ public class FusionOp extends AbstractOp {
     if (overlaySeries == null || baseImage == null || baseSource == null) {
       return Optional.empty();
     }
-    // Prefix stats with the overlay's real modality (PT for PET, NM for SPECT, …) so the panel is
+    // Prefix stats with the overlay's real modality (PT for PET, NM for SPECT, ...) so the panel is
     // correct for non-PET overlays.
     String modality = overlayModalityLabel(overlaySeries);
 
     // Preferred: measure the native overlay slice directly. The ROI is mapped from the displayed
-    // image into overlay pixel space, so statistics are computed on the untouched overlay voxels —
+    // image into overlay pixel space, so statistics are computed on the untouched overlay voxels –
     // no resampling, hence no interpolation loss on the max value. Valid when the matched overlay
     // slice is coplanar with the displayed plane (the usual axial PET/CT case).
-    DicomImageElement overlaySlice =
-        FusionSliceMatcher.findMatchingSlice(baseImage, overlaySeries, null, null);
-    if (overlaySlice != null) {
-      AffineTransform baseToOverlay = baseToOverlayTransform(baseImage, overlaySlice);
-      PlanarImage overlayStored = baseToOverlay == null ? null : overlaySlice.getImage();
-      if (overlayStored != null) {
-        return Optional.of(
-            new FusionMeasurableLayer(overlayStored, overlaySlice, baseToOverlay, false, modality));
+    double[] lpsTransform = getParam(P_FUSION_TRANSFORM, double[].class);
+    if (lpsTransform == null) {
+      DicomImageElement overlaySlice =
+          FusionSliceMatcher.findMatchingSlice(baseImage, overlaySeries, null, null);
+      if (overlaySlice != null) {
+        AffineTransform baseToOverlay = baseToOverlayTransform(baseImage, overlaySlice);
+        PlanarImage overlayStored = baseToOverlay == null ? null : overlaySlice.getImage();
+        if (overlayStored != null) {
+          return Optional.of(
+              new FusionMeasurableLayer(
+                  overlayStored, overlaySlice, baseToOverlay, false, modality));
+        }
       }
     }
 
-    // Fallback: reslice the rectified volume for oblique/MPR planes with no coplanar native slice.
+    // Fallback (and primary path when a 3D registration matrix is active): reslice the volume.
     Volume<?, ?> volume = getParam(P_FUSION_VOLUME, Volume.class);
     if (volume != null && !volume.isBasic()) {
       GeometryOfSlice plane = baseImage.getSliceGeometry();
@@ -507,7 +528,7 @@ public class FusionOp extends AbstractOp {
       if (plane != null && refOverlay != null) {
         PlanarImage values =
             FusionVolumeResampler.resampleToValue(
-                volume, plane, baseSource.width(), baseSource.height());
+                volume, plane, baseSource.width(), baseSource.height(), lpsTransform);
         if (values != null) {
           return Optional.of(new FusionMeasurableLayer(values, refOverlay, null, true, modality));
         }
